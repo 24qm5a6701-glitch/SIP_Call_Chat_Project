@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login + SIP & Chat</title>
+  <script src="https://sipjs.com/download/sip.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .container {
+      width: 95%;
+      max-width: 600px;
+    }
+    .card {
+      background: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    input, button {
+      width: 90%;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+      font-size: 16px;
+    }
+    button {
+      cursor: pointer;
+      background: #007BFF;
+      color: #fff;
+      border: none;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    #chatHistory {
+      height: 250px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    img {
+      max-width: 100%;
+      border-radius: 5px;
+    }
+    @media (max-width: 600px) {
+      input, button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- LOGIN SECTION -->
+  <div id="loginSection" class="card">
+    <h2>🔒 Login</h2>
+    <input type="email" id="email" placeholder="Email" required>
+    <input type="password" id="loginPassword" placeholder="Password" required>
+    <button onclick="login()">Login</button>
+    <div id="loginStatus"></div>
+  </div>
+
+  <!-- MAIN SIP + CHAT SECTION -->
+  <div id="mainSection" style="display:none;">
+    <div class="card" id="call">
+      <h3>📞 SIP Voice Call</h3>
+      <input type="text" id="username" placeholder="SIP Username"><br>
+      <input type="password" id="password" placeholder="SIP Password"><br>
+      <input type="text" id="server" placeholder="wss://edge.sip.onsip.com"><br>
+      <button onclick="registerSIP()">Register</button>
+      <button onclick="makeCall()">Call</button>
+      <button onclick="endCall()">End Call</button>
+      <div id="callStatus"></div>
+    </div>
+
+    <div class="card" id="chat">
+      <h3>💬 Real-Time Chat</h3>
+      <div id="chatHistory"></div>
+      <input id="chatInput" type="text" placeholder="Type message...">
+      <button id="chatSend">Send</button>
+      <input type="file" id="fileInput">
+      <button id="fileSend">📎 Send File</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ---------- LOGIN ----------
+  async function login() {
+    const email = document.getElementById("email").value.trim();
+    const password = document.getElementById("loginPassword").value.trim();
+    const loginStatus = document.getElementById("loginStatus");
+
+    if (!email || !password) {
+      loginStatus.innerHTML = "⚠️ Enter both email and password";
+      return;
+    }
+
+    try {
+      // Call backend login API
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        document.getElementById("loginSection").style.display = "none";
+        document.getElementById("mainSection").style.display = "block";
+      } else {
+        loginStatus.innerHTML = "❌ " + data.message;
+      }
+    } catch (err) {
+      console.error(err);
+      loginStatus.innerHTML = "❌ Login failed, try again.";
+    }
+  }
+
+  // ---------- CHAT ----------
+  const socket = io();
+  const chatHistory = document.getElementById("chatHistory");
+  const chatInput = document.getElementById("chatInput");
+  const chatSend = document.getElementById("chatSend");
+  const fileInput = document.getElementById("fileInput");
+  const fileSend = document.getElementById("fileSend");
+
+  function emoji(score) { return score > 0 ? "😊" : score < 0 ? "😞" : "😐"; }
+
+  function addMessage(msg) {
+    const div = document.createElement("div");
+    let content = `<b>${msg.sender}:</b> ${msg.text || ""}`;
+    if (msg.fileUrl) {
+      if (/\.(jpg|png|gif)$/i.test(msg.fileUrl)) content += `<br><img src="${msg.fileUrl}">`;
+      else content += `<br><a href="${msg.fileUrl}" target="_blank">📎 Download File</a>`;
+    }
+    if (msg.sentiment !== undefined) content += ` ${emoji(msg.sentiment)}`;
+    div.innerHTML = content;
+    chatHistory.appendChild(div);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+  }
+
+  socket.on("chatHistory", (data) => data.forEach(addMessage));
+  socket.on("chatMessage", addMessage);
+
+  chatSend.addEventListener("click", () => {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    const msg = { sender: document.getElementById("username").value || "Guest", text, timestamp: Date.now() };
+    socket.emit("chatMessage", msg);
+    chatInput.value = "";
+  });
+
+  fileSend.addEventListener("click", async () => {
+    const file = fileInput.files[0];
+    if (!file) return alert("Select a file first!");
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    const data = await res.json();
+    const msg = { sender: document.getElementById("username").value || "Guest", fileUrl: data.fileUrl, text: "", timestamp: Date.now() };
+    socket.emit("chatMessage", msg);
+    fileInput.value = "";
+  });
+
+  // ---------- SIP CALL ----------
+  let userAgent, inviter, session;
+
+  function registerSIP() {
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    const server = document.getElementById("server").value;
+    document.getElementById("callStatus").innerHTML = "⏳ Registering...";
+
+    userAgent = new SIP.UserAgent({
+      uri: `sip:${username}@sip.onsip.com`,
+      authorizationUsername: username,
+      authorizationPassword: password,
+      transportOptions: { server }
+    });
+
+    userAgent.start().then(() => {
+      document.getElementById("callStatus").innerHTML = "✅ Registered on SIP";
+    });
+
+    userAgent.delegate = {
+      onInvite: (invitation) => {
+        session = invitation;
+        invitation.accept();
+        document.getElementById("callStatus").innerHTML = "📞 Incoming Call Accepted";
+      }
+    };
+  }
+
+  function makeCall() {
+    const target = prompt("Enter target SIP (e.g. sip:friend@sip.onsip.com)");
+    inviter = new SIP.Inviter(userAgent, SIP.UserAgent.makeURI(target));
+    inviter.invite();
+    document.getElementById("callStatus").innerHTML = "📤 Calling " + target;
+  }
+
+  function endCall() {
+    if (session) {
+      session.bye();
+      document.getElementById("callStatus").innerHTML = "❌ Call Ended";
+    }
+  }
+</script>
+</body>
+</html>
+
+
+
